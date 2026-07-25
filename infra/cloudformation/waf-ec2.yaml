@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "WAF EC2 stack running owasp/modsecurity-crs container"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: waf-lab
+    AllowedPattern: "[a-zA-Z0-9-]+"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the WAF EC2 will be created
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet for the WAF EC2 instance
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair name for SSH access
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+  SshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to access SSH port 22
+  WafHttpPort:
+    Type: Number
+    Default: 80
+  WafHttpsPort:
+    Type: Number
+    Default: 443
+  BackendUpstream:
+    Type: String
+    Default: http://127.0.0.1:8080
+    Description: Upstream backend URL for proxy pass
+
+Resources:
+  WafRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ec2-role-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-role"
+
+  WafInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WafRole
+
+  WafSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} WAF security group"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshCidr
+        - IpProtocol: tcp
+          FromPort: !Ref WafHttpPort
+          ToPort: !Ref WafHttpPort
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: !Ref WafHttpsPort
+          ToPort: !Ref WafHttpsPort
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg"
+
+  WafEc2:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref WafInstanceProfile
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref WafSecurityGroup
+          SubnetId: !Ref SubnetId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-waf-ec2"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          dnf update -y
+          dnf install -y docker
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -SL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          mkdir -p /opt/waf-lab/config/modsecurity
+
+          cat >/opt/waf-lab/docker-compose.yml <<'COMPOSE'
+          version: "3.9"
+          services:
+            waf:
+              image: owasp/modsecurity-crs:nginx
+              container_name: waf-lab
+              restart: unless-stopped
+              ports:
+                - "${WafHttpPort}:80"
+                - "${WafHttpsPort}:443"
+              environment:
+                - PARANOIA=1
+                - ANOMALY_INBOUND=5
+                - ANOMALY_OUTBOUND=4
+                - PROXY=1
+                - BACKEND=${BackendUpstream}
+                - REPORTING_LEVEL=2
+                - MODSEC_RULE_ENGINE=On
+                - BLOCKING_PARANOIA=1
+                - ERRORLOG=/dev/stdout
+                - ACCESSLOG=/dev/stdout
+              volumes:
+                - /opt/waf-lab/config/modsecurity/custom-rules.conf:/etc/modsecurity.d/owasp-crs/custom-rules.conf:ro
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+          COMPOSE
+
+          cat >/opt/waf-lab/config/modsecurity/custom-rules.conf <<'RULES'
+          # Local custom rules for waf-lab
+          SecRule REQUEST_HEADERS:User-Agent "@rx (?i)(sqlmap|nikto|nmap|acunetix)" \
+            "id:1000002,phase:1,deny,status:403,log,msg:'Blocked known scanner user-agent'"
+          RULES
+
+          cd /opt/waf-lab
+          /usr/local/lib/docker/cli-plugins/docker-compose up -d
+
+Outputs:
+  InstanceId:
+    Value: !Ref WafEc2
+  PublicIp:
+    Value: !GetAtt WafEc2.PublicIp
+  PublicDnsName:
+    Value: !GetAtt WafEc2.PublicDnsName
+  SecurityGroupId:
+    Value: !Ref WafSecurityGroup
