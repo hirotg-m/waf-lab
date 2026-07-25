@@ -15,6 +15,7 @@ waf-lab/
 		architecture.md
 		ec2-setup.md
 		operations.md
+		requirements.md
 	infra/
 		cloudformation/
 			waf-ec2.yaml
@@ -85,6 +86,7 @@ cp infra/docker/.env.example infra/docker/.env
 
 ## Next Reading
 
+- Requirements: `docs/requirements.md`
 - EC2 setup: `docs/ec2-setup.md`
 - Architecture: `docs/architecture.md`
 - Operations and tuning: `docs/operations.md`

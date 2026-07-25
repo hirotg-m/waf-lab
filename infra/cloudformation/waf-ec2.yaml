@@ -141,14 +141,25 @@ Resources:
                 - BLOCKING_PARANOIA=1
                 - ERRORLOG=/dev/stdout
                 - ACCESSLOG=/dev/stdout
+                - TZ=UTC
               volumes:
                 - /opt/waf-lab/config/modsecurity/custom-rules.conf:/etc/modsecurity.d/owasp-crs/custom-rules.conf:ro
+                - waf_logs:/var/log/nginx
               extra_hosts:
                 - "host.docker.internal:host-gateway"
+          volumes:
+            waf_logs:
           COMPOSE
 
           cat >/opt/waf-lab/config/modsecurity/custom-rules.conf <<'RULES'
-          # Local custom rules for waf-lab
+          # Local custom rules for waf-lab.
+          # Start in DetectionOnly while tuning and then switch to On.
+
+          # Example: Allow a known health check path with low false positive risk.
+          SecRule REQUEST_URI "@streq /healthz" \
+            "id:1000001,phase:1,pass,nolog,ctl:ruleEngine=DetectionOnly"
+
+          # Example: Block suspicious scanner user-agent strings.
           SecRule REQUEST_HEADERS:User-Agent "@rx (?i)(sqlmap|nikto|nmap|acunetix)" \
             "id:1000002,phase:1,deny,status:403,log,msg:'Blocked known scanner user-agent'"
           RULES
